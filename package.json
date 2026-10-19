@@ -1,0 +1,11 @@
+{
+  "name": "meter",
+  "private": true,
+  "type": "module",
+  "description": "Deploy and verify scripts for the METER contracts",
+  "dependencies": {
+    "ethers": "6.17.0",
+    "genlayer-js": "2.0.0-rc.1",
+    "viem": "2.57.2"
+  }
+}
