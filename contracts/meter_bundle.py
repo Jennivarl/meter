@@ -7,7 +7,7 @@ DOWN = 'down'
 OUTCOMES = (UP, DOWN)
 MIN_SAMPLES = 3
 MIN_SAMPLE_GAP = 600
-MIN_WINDOW = 1800
+MIN_WINDOW = 3600
 MAX_WINDOW = 31 * 24 * 3600
 FULL = 10000
 _MAX_PATH = 120
@@ -98,14 +98,12 @@ def _days_from_civil(year: int, month: int, day: int) -> int:
 from dataclasses import dataclass
 import genlayer as gl
 from genlayer.types import *
-_MAX_NOTE = 60
 
 @gl.storage.allow
 @dataclass
 class Reading:
     at: str
     outcome: str
-    note: str
 
 @gl.storage.allow
 @dataclass
@@ -159,12 +157,10 @@ class Meter(gl.contract.Contract):
             leader = leaders_res.calldata
             if not isinstance(leader, dict):
                 return False
-            mine = _read(url, marker)
-            return leader.get('outcome') == mine['outcome'] and leader.get('note') == mine['note']
+            return leader.get('outcome') == _read(url, marker)['outcome']
         agreed = gl.vm.run_nondet(leader_fn, validator_fn)
         outcome = str(agreed['outcome'])
-        note = str(agreed['note'])
-        if outcome not in OUTCOMES or not note or len(note) > _MAX_NOTE:
+        if outcome not in OUTCOMES:
             raise gl.vm.UserError('a reading no fetch could produce')
         stamp = _stamp()
         if outcome == UP:
@@ -173,7 +169,7 @@ class Meter(gl.contract.Contract):
             tally.down = tally.down + 1
         tally.last_at = stamp
         self.tallies[key] = tally
-        self.readings.get_or_insert_default(key).append(Reading(at=stamp, outcome=outcome, note=note))
+        self.readings.get_or_insert_default(key).append(Reading(at=stamp, outcome=outcome))
         return _tally_dict(key, tally, ends, now)
 
     @gl.public.view
@@ -189,7 +185,7 @@ class Meter(gl.contract.Contract):
         key = plan_id.strip().lower()
         if key not in self.readings:
             return []
-        return [{'at': r.at, 'outcome': r.outcome, 'note': r.note} for r in self.readings[key]]
+        return [{'at': r.at, 'outcome': r.outcome} for r in self.readings[key]]
 
     @gl.public.view
     def settings(self) -> dict:
@@ -201,8 +197,8 @@ def _read(url: str, marker: str) -> dict:
         status = int(resp.status)
         body = (resp.body or b'').decode('utf-8', errors='replace')
     except Exception:
-        return unreached()
-    return classify(status, body, marker)
+        return {'outcome': unreached()['outcome']}
+    return {'outcome': classify(status, body, marker)['outcome']}
 
 def _stamp() -> str:
     return str(gl.message.raw['datetime'])

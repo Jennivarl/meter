@@ -3,15 +3,15 @@
   "chainId": 61997,
   "rpc": "https://studio-next.genlayer.com/api",
   "explorer": "https://explorer-studio-dev.genlayer.com",
-  "plan": "0x89Cef3F64f73DB529cc25CaFeC6bc6F1Db36B7aA",
-  "meter": "0xa4a703F4be228c666aA0dDCbc28C46CfA8daAff3",
-  "ledger": "0xfAAeeBdE9A730b75c9B974A2e15B6C0e6c161E1a",
-  "grade": "0x4F230A51f8dcC2A0db2fDe275Dd86D8b9676ffC0",
+  "plan": "0x8cFDf3058D802b5ce2E37c92025A455429bca5B4",
+  "meter": "0xE93D3cCb49dEd2a834B3D698A868fD165dd67b67",
+  "ledger": "0x874416C756Bc810c81c80627BF8676d00ddEC89F",
+  "grade": "0xBf4472dCEB19394E2085655446d60dEE990950d4",
   "deployTx": {
-    "plan": "0xc4b1d53a12194739c3ce096cdb2cdc0224aa958d8bccdff00cbbfd664a181300",
-    "meter": "0xef9dbfbef21456ba1a49bc4b6c072cb6122050b40ba3106029e7aec0ec3d747d",
-    "ledger": "0xf91eedd212a6fb7b163da1fe8b446f8a49664d2238580c1fd19a56c5cb4672c0",
-    "grade": "0xae9a6c74a3e1908043f21c20a79e1e8abe5694f7d9b374b5b03c9597c99d4f69"
+    "plan": "0x94f8a9c5fc418c4ced36b379d5dca7fde7f8a8b17989e4055e10476db1478759",
+    "meter": "0xef4fb1431cd9f09ea8bd219b169b37e0c97738ffe2f7aad7f88f232aca223115",
+    "ledger": "0x556189440839f596a56b923b9df915a1ffbfa8ac5b1eef29979deaaebe1cab1b",
+    "grade": "0xfb05b62961fa77df6101525fa5440a9c1815cb9a535a29aca011e5464b5fbc38"
   },
   "deployed": "2026-10-19"
 }

@@ -118,8 +118,8 @@ def test_a_fee_must_be_positive(direct_vm, book):
         propose(direct_vm, book, fee=0)
 
 
-@pytest.mark.parametrize("minutes", [0, 29, 31 * 24 * 60 + 1])
-def test_a_window_outside_thirty_minutes_to_a_month_is_refused(direct_vm, book, minutes):
+@pytest.mark.parametrize("minutes", [0, 59, 31 * 24 * 60 + 1])
+def test_a_window_outside_an_hour_to_a_month_is_refused(direct_vm, book, minutes):
     with direct_vm.expect_revert("a window is"):
         propose(direct_vm, book, minutes=minutes)
 

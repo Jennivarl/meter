@@ -8,9 +8,12 @@ METER. The measurements, taken from the live service under consensus.
     samples(plan_id)  every reading, oldest first
 
 Each sample is one consensus round over a real HTTP fetch. Every validator
-fetches the plan's URL itself, reduces the answer to an outcome and a
-reason, and agrees with the leader only if both match exactly. Nothing a
-caller passes reaches the fetch: the URL and the marker come from PLAN.
+fetches the plan's URL itself, reduces the answer to up or down, and agrees
+with the leader only if the outcome matches. Only the outcome is compared,
+and only the outcome is stored: a real outage looks different from
+different places, and requiring agreement on why it was down would let
+outages fail consensus while healthy samples never do. Nothing a caller
+passes reaches the fetch: the URL and the marker come from PLAN.
 
 Three rules decide which samples exist at all:
 
@@ -39,15 +42,11 @@ from contracts.metering import (
     url_for,
 )
 
-_MAX_NOTE = 60
-
-
 @gl.storage.allow
 @dataclass
 class Reading:
     at: str
     outcome: str
-    note: str
 
 
 @gl.storage.allow
@@ -117,16 +116,14 @@ class Meter(gl.contract.Contract):
             leader = leaders_res.calldata
             if not isinstance(leader, dict):
                 return False
-            mine = _read(url, marker)
-            # Outcome and reason both, by exact equality.
-            return leader.get("outcome") == mine["outcome"] and leader.get("note") == mine["note"]
+            # The outcome only. Two validators can see the same outage as a
+            # 502 and a timeout, and both are right that it was down.
+            return leader.get("outcome") == _read(url, marker)["outcome"]
 
         agreed = gl.vm.run_nondet(leader_fn, validator_fn)
         outcome = str(agreed["outcome"])
-        note = str(agreed["note"])
-        # Only an outcome this contract defines, and a reason short enough
-        # to be a reason, is ever written down.
-        if outcome not in OUTCOMES or not note or len(note) > _MAX_NOTE:
+        # Only an outcome this contract defines is ever written down.
+        if outcome not in OUTCOMES:
             raise gl.vm.UserError("a reading no fetch could produce")
 
         stamp = _stamp()
@@ -136,7 +133,7 @@ class Meter(gl.contract.Contract):
             tally.down = tally.down + 1
         tally.last_at = stamp
         self.tallies[key] = tally
-        self.readings.get_or_insert_default(key).append(Reading(at=stamp, outcome=outcome, note=note))
+        self.readings.get_or_insert_default(key).append(Reading(at=stamp, outcome=outcome))
         return _tally_dict(key, tally, ends, now)
 
     @gl.public.view
@@ -159,7 +156,7 @@ class Meter(gl.contract.Contract):
         key = plan_id.strip().lower()
         if key not in self.readings:
             return []
-        return [{"at": r.at, "outcome": r.outcome, "note": r.note} for r in self.readings[key]]
+        return [{"at": r.at, "outcome": r.outcome} for r in self.readings[key]]
 
     @gl.public.view
     def settings(self) -> dict:
@@ -171,14 +168,14 @@ class Meter(gl.contract.Contract):
 
 
 def _read(url: str, marker: str) -> dict:
-    """Fetch once and say exactly what happened, in primitives only."""
+    """Fetch once and reduce it to the one thing consensus is asked about."""
     try:
         resp = gl.nondet.web.get(url)
         status = int(resp.status)
         body = (resp.body or b"").decode("utf-8", errors="replace")
     except Exception:
-        return unreached()
-    return classify(status, body, marker)
+        return {"outcome": unreached()["outcome"]}
+    return {"outcome": classify(status, body, marker)["outcome"]}
 
 
 def _stamp() -> str:

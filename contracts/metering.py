@@ -26,6 +26,14 @@ an inheritance, mistaking an unreachable host for silence hands over an
 estate, so it must count for nothing. For a bill, ignoring it pays for an
 outage. Which way an ambiguous reading falls is decided by who would be
 hurt by getting it wrong.
+
+Validators agree on the outcome, never on the reason. A healthy response
+is the same everywhere, but a real outage is not: one validator sees a
+502, another a 503, a third a timeout. Requiring them to agree on why it
+was down would make outages fail consensus more often than healthy
+samples, so outages would quietly go unrecorded and every bill would lean
+toward the provider. The reason never affects the money, so it is not
+compared, and because consensus did not agree on it, it is not stored.
 """
 
 UP = "up"
@@ -43,9 +51,10 @@ MIN_SAMPLES = 3
 # call that a month.
 MIN_SAMPLE_GAP = 600
 
-# A billing window long enough to hold MIN_SAMPLES spaced samples, and no
+# A billing window with room for MIN_SAMPLES spaced samples and slack to
+# spare, so one slow transaction cannot leave a plan unable to bill, and no
 # longer than a month.
-MIN_WINDOW = 1800
+MIN_WINDOW = 3600
 MAX_WINDOW = 31 * 24 * 3600
 
 # The share of samples that found the service up, in basis points.

@@ -65,18 +65,26 @@ def test_a_healthy_service_is_recorded_up(direct_vm, meter):
     assert got["up"] == "1"
     assert got["down"] == "0"
     assert got["samples"] == "1"
-    assert meter.samples(PLAN_ID)[0]["note"] == "answered with the marker"
+    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "outcome": "up"}
 
 
 def test_a_maintenance_page_served_as_a_200_is_recorded_down(direct_vm, meter):
     got = sample_at(direct_vm, meter, 1, body="We'll be back soon")
     assert got["down"] == "1"
-    assert meter.samples(PLAN_ID)[0]["note"] == "answered without the marker"
 
 
-def test_a_server_error_is_recorded_down_with_its_status(direct_vm, meter):
+def test_a_server_error_is_recorded_down(direct_vm, meter):
     sample_at(direct_vm, meter, 1, status=503)
-    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "outcome": "down", "note": "answered 503"}
+    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "outcome": "down"}
+
+
+def test_only_the_outcome_is_stored_because_only_the_outcome_is_agreed(direct_vm, meter):
+    """
+    Consensus is asked whether the service was up, not why it was down, so
+    a reason nobody agreed on is never written to the contract.
+    """
+    sample_at(direct_vm, meter, 1, status=502)
+    assert set(meter.samples(PLAN_ID)[0]) == {"at", "outcome"}
 
 
 def test_a_status_that_might_be_about_the_route_still_counts_against_the_provider(direct_vm, meter):
@@ -95,7 +103,6 @@ def test_a_host_that_cannot_be_reached_counts_as_down_not_as_nothing(direct_vm, 
     with direct_vm.prank(BUYER):
         got = meter.sample(PLAN_ID)
     assert got["down"] == "1"
-    assert meter.samples(PLAN_ID)[0]["note"] == "could not be reached"
 
 
 def test_the_tally_reports_uptime_in_basis_points(direct_vm, meter):
@@ -170,8 +177,9 @@ def test_the_url_comes_from_the_plan_and_nothing_else(direct_vm, meter, stubs):
     direct_vm.mock_web(URL, {"status": 200, "body": MARKER})
     with direct_vm.prank(BUYER):
         meter.sample(PLAN_ID)
-    # The mock only answers the agreed URL, so a fetch of anything else fails.
-    assert meter.samples(PLAN_ID)[0]["note"] == "could not be reached"
+    # The mock only answers the agreed URL, so a fetch of anything else
+    # fails and is recorded down, rather than up from the mocked page.
+    assert meter.samples(PLAN_ID)[0]["outcome"] == "down"
 
 
 def test_the_tally_is_closed_once_the_window_has_ended(direct_vm, meter):
@@ -193,8 +201,8 @@ def test_a_plan_never_sampled_has_an_empty_tally_not_an_error(direct_vm, meter):
 # --------------------------------------------------------------------
 
 
-def leader(outcome, note):
-    return {"outcome": outcome, "note": note}
+def leader(outcome):
+    return {"outcome": outcome}
 
 
 def test_a_validator_agrees_when_it_reads_the_same_thing(direct_vm, meter):
@@ -205,24 +213,31 @@ def test_a_validator_agrees_when_it_reads_the_same_thing(direct_vm, meter):
 def test_a_validator_rejects_a_leader_who_calls_an_outage_up(direct_vm, meter):
     """The lie that pays a provider for a broken service."""
     sample_at(direct_vm, meter, 1, status=503)
-    assert direct_vm.run_validator(leader_result=leader("up", "answered with the marker")) is False
+    assert direct_vm.run_validator(leader_result=leader("up")) is False
 
 
 def test_a_validator_rejects_a_leader_who_calls_a_healthy_service_down(direct_vm, meter):
     """The lie that refunds a buyer for a service they got."""
     sample_at(direct_vm, meter, 1)
-    assert direct_vm.run_validator(leader_result=leader("down", "answered 503")) is False
+    assert direct_vm.run_validator(leader_result=leader("down")) is False
 
 
-def test_validators_must_agree_on_the_reason_not_only_the_outcome(direct_vm, meter):
+def test_validators_agree_an_outage_was_down_whatever_each_of_them_saw(direct_vm, meter):
+    """
+    The bias this prevents: one validator sees a 502, another a 503, a third
+    a timeout. Demanding they agree on the reason would let real outages fail
+    consensus while healthy samples never do, and bills would lean toward the
+    provider. Here the validator saw a 503 and agrees with a leader who only
+    says down.
+    """
     sample_at(direct_vm, meter, 1, status=503)
-    assert direct_vm.run_validator(leader_result=leader("down", "answered 500")) is False
-    assert direct_vm.run_validator(leader_result=leader("down", "answered 503")) is True
+    assert direct_vm.run_validator(leader_result=leader("down")) is True
+    assert direct_vm.run_validator(leader_result={"outcome": "down", "note": "answered 502"}) is True
 
 
 def test_a_validator_rejects_an_outcome_the_contract_does_not_define(direct_vm, meter):
     sample_at(direct_vm, meter, 1)
-    assert direct_vm.run_validator(leader_result=leader("mostly", "answered with the marker")) is False
+    assert direct_vm.run_validator(leader_result=leader("mostly")) is False
 
 
 def test_a_validator_rejects_a_result_of_the_wrong_shape(direct_vm, meter):
