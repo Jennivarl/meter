@@ -16,13 +16,16 @@ from contracts.metering import (
     DOWN,
     FULL,
     MAX_WINDOW,
-    MIN_SAMPLE_GAP,
     MIN_SAMPLES,
     MIN_WINDOW,
+    READ_WITHIN,
+    SLOT_SECONDS,
     UP,
     classify,
     epoch_seconds,
     share,
+    slot_at,
+    slot_count,
     unreached,
     uptime_bp,
     url_for,
@@ -99,20 +102,30 @@ def test_the_reason_differs_between_kinds_of_down_so_validators_must_agree_on_it
 
 
 def test_a_perfect_window_pays_the_provider_everything():
-    assert share(1_000_000, 6, 6) == {"provider": 1_000_000, "buyer": 0, "billed": True}
+    assert share(1_000_000, 6, 6, 6) == {"provider": 1_000_000, "buyer": 0, "billed": True}
 
 
 def test_a_dead_window_pays_the_provider_nothing():
-    assert share(1_000_000, 0, 6) == {"provider": 0, "buyer": 1_000_000, "billed": True}
+    assert share(1_000_000, 0, 6, 6) == {"provider": 0, "buyer": 1_000_000, "billed": True}
 
 
-def test_the_fee_divides_by_the_share_of_samples_that_were_up():
-    assert share(1_000_000, 3, 4) == {"provider": 750_000, "buyer": 250_000, "billed": True}
+def test_the_fee_divides_by_the_share_of_slots_that_were_up():
+    assert share(1_000_000, 3, 4, 4) == {"provider": 750_000, "buyer": 250_000, "billed": True}
+
+
+def test_a_slot_nobody_read_is_not_paid():
+    """Four of six slots read, all up: four sixths, not four fourths."""
+    assert share(600, 4, 4, 6) == {"provider": 400, "buyer": 200, "billed": True}
+
+
+def test_skipping_the_bad_slots_cannot_raise_the_providers_share():
+    """Reading only the good slots pays the same as reading the bad ones as down."""
+    assert share(600, 4, 4, 6)["provider"] == share(600, 4, 6, 6)["provider"]
 
 
 def test_rounding_goes_to_the_side_that_paid():
-    """1000 over 3 samples, 2 up: 666.66 rounds down to 666, the 334 goes back."""
-    got = share(1000, 2, 3)
+    """1000 over 3 slots, 2 up: 666.66 rounds down to 666, the 334 goes back."""
+    got = share(1000, 2, 3, 3)
     assert got["provider"] == 666
     assert got["buyer"] == 334
 
@@ -122,36 +135,41 @@ def test_the_two_parts_always_sum_to_exactly_the_fee():
     rng = random.Random(20261020)
     for _ in range(5000):
         fee = rng.randrange(0, 10**24)
-        taken = rng.randrange(MIN_SAMPLES, 5000)
+        slots = rng.randrange(MIN_SAMPLES, 5000)
+        taken = rng.randrange(MIN_SAMPLES, slots + 1)
         up = rng.randrange(0, taken + 1)
-        got = share(fee, up, taken)
+        got = share(fee, up, taken, slots)
         assert got["provider"] + got["buyer"] == fee
         assert 0 <= got["provider"] <= fee
 
 
 def test_more_uptime_never_pays_the_provider_less():
     fee, taken = 999_983, 17
-    paid = [share(fee, up, taken)["provider"] for up in range(taken + 1)]
+    paid = [share(fee, up, taken, taken)["provider"] for up in range(taken + 1)]
     assert paid == sorted(paid)
 
 
 def test_too_few_samples_bill_nothing_and_return_it_all():
     for taken in range(MIN_SAMPLES):
-        assert share(1_000_000, taken, taken) == {"provider": 0, "buyer": 1_000_000, "billed": False}
+        assert share(1_000_000, taken, taken, 6) == {"provider": 0, "buyer": 1_000_000, "billed": False}
 
 
 def test_exactly_the_minimum_is_enough_to_bill():
-    assert share(900, MIN_SAMPLES, MIN_SAMPLES)["billed"] is True
+    assert share(900, MIN_SAMPLES, MIN_SAMPLES, MIN_SAMPLES)["billed"] is True
 
 
-@pytest.mark.parametrize("fee,up,taken", [(-1, 1, 3), (100, -1, 3), (100, 4, 3), (100, 1, -1)])
-def test_an_impossible_tally_is_refused_rather_than_paid(fee, up, taken):
+@pytest.mark.parametrize(
+    "fee,up,taken,slots",
+    [(-1, 1, 3, 3), (100, -1, 3, 3), (100, 4, 3, 3), (100, 1, -1, 3), (100, 3, 4, 3)],
+)
+def test_an_impossible_tally_is_refused_rather_than_paid(fee, up, taken, slots):
     with pytest.raises(ValueError):
-        share(fee, up, taken)
+        share(fee, up, taken, slots)
 
 
 def test_uptime_is_reported_in_basis_points_rounded_down():
     assert uptime_bp(3, 4) == 7500
+    assert uptime_bp(4, 6) == 6666
     assert uptime_bp(2, 3) == 6666
     assert uptime_bp(5, 5) == FULL
     assert uptime_bp(0, 0) == 0
@@ -197,9 +215,50 @@ def test_the_url_is_always_https_and_built_from_the_parts():
     assert url_for("Status.Example.com", "/health") == "https://status.example.com/health"
 
 
-def test_the_window_and_gap_leave_room_for_enough_spaced_samples():
-    assert MIN_WINDOW >= (MIN_SAMPLES - 1) * MIN_SAMPLE_GAP
+def test_the_shortest_window_holds_enough_slots_to_bill():
+    assert MIN_WINDOW // SLOT_SECONDS >= MIN_SAMPLES * 2
     assert MAX_WINDOW == 31 * 24 * 3600
+
+
+def test_the_reading_band_is_shorter_than_a_slot():
+    assert 0 < READ_WITHIN < SLOT_SECONDS
+
+
+# --------------------------------------------------------------------
+# when a reading may be taken
+# --------------------------------------------------------------------
+
+OPENS = 1_000_000
+ENDS = OPENS + 3600
+
+
+def test_a_window_is_cut_into_fixed_slots():
+    assert slot_count(OPENS, ENDS) == 6
+    assert slot_count(-1, -1) == 0
+
+
+def test_a_reading_early_in_a_slot_belongs_to_it():
+    assert slot_at(OPENS, ENDS, OPENS) == 0
+    assert slot_at(OPENS, ENDS, OPENS + READ_WITHIN - 1) == 0
+    assert slot_at(OPENS, ENDS, OPENS + 2 * SLOT_SECONDS + 30) == 2
+
+
+def test_a_reading_late_in_a_slot_belongs_to_none():
+    """So nobody can wait out a slot for the moment that suits them."""
+    assert slot_at(OPENS, ENDS, OPENS + READ_WITHIN) == -1
+    assert slot_at(OPENS, ENDS, OPENS + SLOT_SECONDS - 1) == -1
+
+
+def test_nothing_belongs_to_a_slot_outside_the_window():
+    assert slot_at(OPENS, ENDS, OPENS - 1) == -1
+    assert slot_at(OPENS, ENDS, ENDS) == -1
+    assert slot_at(-1, -1, OPENS) == -1
+
+
+def test_a_partial_last_slot_is_not_a_slot():
+    ends = OPENS + 3600 + 300
+    assert slot_count(OPENS, ends) == 6
+    assert slot_at(OPENS, ends, OPENS + 3600 + 10) == -1
 
 
 # --------------------------------------------------------------------

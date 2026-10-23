@@ -8,14 +8,14 @@
 // deployed, hashes it, and compares that with the bundle on disk.
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { connect } from "./chain.mjs";
+import { reader } from "./chain.mjs";
 
 const live = JSON.parse(readFileSync(new URL("./live.json", import.meta.url), "utf8"));
 const only = process.argv[2];
 const names = Object.keys(live.deployTx ?? {}).filter((n) => !only || n === only);
 if (!names.length) throw new Error("no such contract in live.json: " + (only ?? "(none deployed)"));
 
-const { client } = await connect();
+const client = reader();
 const sha = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 let allMatch = true;
 

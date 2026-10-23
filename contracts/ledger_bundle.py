@@ -6,7 +6,8 @@ UP = 'up'
 DOWN = 'down'
 OUTCOMES = (UP, DOWN)
 MIN_SAMPLES = 3
-MIN_SAMPLE_GAP = 600
+SLOT_SECONDS = 600
+READ_WITHIN = 240
 MIN_WINDOW = 3600
 MAX_WINDOW = 31 * 24 * 3600
 FULL = 10000
@@ -51,20 +52,36 @@ def classify(status: int, body: str, marker: str) -> dict:
 def unreached() -> dict:
     return {'outcome': DOWN, 'note': 'could not be reached'}
 
-def uptime_bp(up: int, samples: int) -> int:
-    if samples <= 0:
+def slot_count(opens: int, ends: int) -> int:
+    if opens < 0 or ends <= opens:
         return 0
-    return int(up) * FULL // int(samples)
+    return (int(ends) - int(opens)) // SLOT_SECONDS
 
-def share(fee: int, up: int, samples: int) -> dict:
+def slot_at(opens: int, ends: int, now: int) -> int:
+    if opens < 0 or now < opens or now >= ends:
+        return -1
+    k = (int(now) - int(opens)) // SLOT_SECONDS
+    if k >= slot_count(opens, ends):
+        return -1
+    if int(now) - (int(opens) + k * SLOT_SECONDS) >= READ_WITHIN:
+        return -1
+    return k
+
+def uptime_bp(up: int, slots: int) -> int:
+    if slots <= 0:
+        return 0
+    return int(up) * FULL // int(slots)
+
+def share(fee: int, up: int, taken: int, slots: int) -> dict:
     total = int(fee)
     up_n = int(up)
-    taken = int(samples)
-    if total < 0 or up_n < 0 or taken < 0 or (up_n > taken):
+    read = int(taken)
+    n = int(slots)
+    if total < 0 or up_n < 0 or read < 0 or (up_n > read) or (read > n):
         raise ValueError('an impossible tally')
-    if taken < MIN_SAMPLES:
+    if read < MIN_SAMPLES:
         return {'provider': 0, 'buyer': total, 'billed': False}
-    provider = total * up_n // taken
+    provider = total * up_n // n
     return {'provider': provider, 'buyer': total - provider, 'billed': True}
 
 def epoch_seconds(stamp: str):
@@ -115,6 +132,7 @@ class Escrow:
     buyer_paid: u256
     uptime_bp: u256
     samples: u256
+    slots: u256
     decided_at: str
     reason: str
 
@@ -145,7 +163,7 @@ class Ledger(gl.contract.Contract):
             raise gl.vm.UserError(f"send exactly the plan's fee, {fee}")
         if key in self.escrows:
             raise gl.vm.UserError('that plan is already funded')
-        self.escrows[key] = Escrow(plan_id=key, buyer=buyer, provider=_address(terms['provider']), amount=amount, funded_at=_stamp(), state=STATE_FUNDED, provider_paid=0, buyer_paid=0, uptime_bp=0, samples=0, decided_at='', reason='held until the window closes')
+        self.escrows[key] = Escrow(plan_id=key, buyer=buyer, provider=_address(terms['provider']), amount=amount, funded_at=_stamp(), state=STATE_FUNDED, provider_paid=0, buyer_paid=0, uptime_bp=0, samples=0, slots=0, decided_at='', reason='held until the window closes')
         self.escrow_ids.append(key)
         self.committed = self.committed + amount
         return _as_dict(key, self.escrows[key])
@@ -183,15 +201,18 @@ class Ledger(gl.contract.Contract):
             raise gl.vm.UserError('the window is still open, so the tally is not final')
         up = int(str(tally['up']))
         taken = int(str(tally['samples']))
-        split = share(int(escrow.amount), up, taken)
+        slots = int(str(tally['slots']))
+        split = share(int(escrow.amount), up, taken, slots)
         escrow.state = STATE_SETTLED
         escrow.provider_paid = split['provider']
         escrow.buyer_paid = split['buyer']
-        escrow.uptime_bp = uptime_bp(up, taken)
+        escrow.uptime_bp = uptime_bp(up, slots)
         escrow.samples = taken
+        escrow.slots = slots
         escrow.decided_at = _stamp()
         if split['billed']:
-            escrow.reason = f'{up} of {taken} samples found the service up'
+            unread = f', {slots - taken} not read' if slots > taken else ''
+            escrow.reason = f'{up} of {slots} slots found the service up{unread}'
         else:
             escrow.reason = f'only {taken} samples were taken and {MIN_SAMPLES} are needed to bill'
         self.escrows[key] = escrow
@@ -261,4 +282,4 @@ def _pay(to: Address, amount: int) -> None:
     _Wallet(to).emit_transfer(value=amount)
 
 def _as_dict(key: str, escrow: Escrow) -> dict:
-    return {'plan_id': key, 'buyer': escrow.buyer.as_hex, 'provider': escrow.provider.as_hex, 'amount': str(escrow.amount), 'funded_at': escrow.funded_at, 'state': escrow.state, 'provider_paid': str(escrow.provider_paid), 'buyer_paid': str(escrow.buyer_paid), 'uptime_bp': str(escrow.uptime_bp), 'samples': str(escrow.samples), 'decided_at': escrow.decided_at, 'reason': escrow.reason}
+    return {'plan_id': key, 'buyer': escrow.buyer.as_hex, 'provider': escrow.provider.as_hex, 'amount': str(escrow.amount), 'funded_at': escrow.funded_at, 'state': escrow.state, 'provider_paid': str(escrow.provider_paid), 'buyer_paid': str(escrow.buyer_paid), 'uptime_bp': str(escrow.uptime_bp), 'samples': str(escrow.samples), 'slots': str(escrow.slots), 'decided_at': escrow.decided_at, 'reason': escrow.reason}

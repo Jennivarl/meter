@@ -65,7 +65,7 @@ def test_a_healthy_service_is_recorded_up(direct_vm, meter):
     assert got["up"] == "1"
     assert got["down"] == "0"
     assert got["samples"] == "1"
-    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "outcome": "up"}
+    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "slot": "0", "outcome": "up"}
 
 
 def test_a_maintenance_page_served_as_a_200_is_recorded_down(direct_vm, meter):
@@ -75,16 +75,17 @@ def test_a_maintenance_page_served_as_a_200_is_recorded_down(direct_vm, meter):
 
 def test_a_server_error_is_recorded_down(direct_vm, meter):
     sample_at(direct_vm, meter, 1, status=503)
-    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "outcome": "down"}
+    assert meter.samples(PLAN_ID)[0] == {"at": at(1), "slot": "0", "outcome": "down"}
 
 
 def test_only_the_outcome_is_stored_because_only_the_outcome_is_agreed(direct_vm, meter):
     """
     Consensus is asked whether the service was up, not why it was down, so
-    a reason nobody agreed on is never written to the contract.
+    a reason nobody agreed on is never written to the contract. The time
+    and the slot come from the transaction itself.
     """
     sample_at(direct_vm, meter, 1, status=502)
-    assert set(meter.samples(PLAN_ID)[0]) == {"at", "outcome"}
+    assert set(meter.samples(PLAN_ID)[0]) == {"at", "slot", "outcome"}
 
 
 def test_a_status_that_might_be_about_the_route_still_counts_against_the_provider(direct_vm, meter):
@@ -105,13 +106,14 @@ def test_a_host_that_cannot_be_reached_counts_as_down_not_as_nothing(direct_vm, 
     assert got["down"] == "1"
 
 
-def test_the_tally_reports_uptime_in_basis_points(direct_vm, meter):
+def test_the_tally_reports_uptime_over_every_slot(direct_vm, meter):
     sample_at(direct_vm, meter, 1)
     sample_at(direct_vm, meter, 11)
     got = sample_at(direct_vm, meter, 21, status=502)
     assert got["up"] == "2"
     assert got["samples"] == "3"
-    assert got["uptime_bp"] == "6666"
+    assert got["slots"] == "6"
+    assert got["uptime_bp"] == "3333"
     assert got["enough"] is True
 
 
@@ -126,17 +128,43 @@ def test_every_reading_is_kept_in_order(direct_vm, meter):
 # --------------------------------------------------------------------
 
 
-def test_samples_must_be_spaced_apart(direct_vm, meter):
+def test_each_slot_takes_one_reading(direct_vm, meter):
     sample_at(direct_vm, meter, 1)
-    with direct_vm.expect_revert("must be 600 apart"):
-        sample_at(direct_vm, meter, 5)
+    with direct_vm.expect_revert("slot 0 already has its reading"):
+        sample_at(direct_vm, meter, 3)
 
 
-def test_the_gap_applies_across_every_caller(direct_vm, meter):
+def test_one_reading_per_slot_applies_across_every_caller(direct_vm, meter):
     """Otherwise the provider and a friend could take turns in one good minute."""
     sample_at(direct_vm, meter, 1, who=PROVIDER)
-    with direct_vm.expect_revert("must be 600 apart"):
+    with direct_vm.expect_revert("already has its reading"):
         sample_at(direct_vm, meter, 2, who=STRANGER)
+
+
+def test_a_reading_late_in_a_slot_is_refused(direct_vm, meter):
+    """Nobody can wait for the moment that suits them: the band is fixed."""
+    with direct_vm.expect_revert("first 240 seconds"):
+        sample_at(direct_vm, meter, 5)
+    with direct_vm.expect_revert("first 240 seconds"):
+        sample_at(direct_vm, meter, 19, who=PROVIDER)
+
+
+def test_readings_are_recorded_with_their_slot(direct_vm, meter):
+    sample_at(direct_vm, meter, 1)
+    sample_at(direct_vm, meter, 32)
+    assert [r["slot"] for r in meter.samples(PLAN_ID)] == ["0", "3"]
+
+
+def test_slots_nobody_read_still_count_in_the_tally(direct_vm, meter):
+    """Skipping the bad slots cannot raise the provider's uptime."""
+    sample_at(direct_vm, meter, 1)
+    sample_at(direct_vm, meter, 11)
+    sample_at(direct_vm, meter, 21)
+    set_date(direct_vm, at(60))
+    got = meter.tally(PLAN_ID)
+    assert got["samples"] == "3"
+    assert got["slots"] == "6"
+    assert got["uptime_bp"] == "5000"
 
 
 def test_anyone_may_sample_because_the_reading_is_the_networks_not_theirs(direct_vm, meter):
@@ -253,5 +281,6 @@ def test_a_validator_rejects_a_leader_that_errored(direct_vm, meter):
 def test_the_settings_are_published(direct_vm, meter):
     got = meter.settings()
     assert got["plan"].lower() == PLAN_AT
-    assert got["min_sample_gap_seconds"] == "600"
+    assert got["slot_seconds"] == "600"
+    assert got["read_within_seconds"] == "240"
     assert got["min_samples"] == "3"

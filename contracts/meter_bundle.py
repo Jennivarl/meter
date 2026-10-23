@@ -6,7 +6,8 @@ UP = 'up'
 DOWN = 'down'
 OUTCOMES = (UP, DOWN)
 MIN_SAMPLES = 3
-MIN_SAMPLE_GAP = 600
+SLOT_SECONDS = 600
+READ_WITHIN = 240
 MIN_WINDOW = 3600
 MAX_WINDOW = 31 * 24 * 3600
 FULL = 10000
@@ -51,20 +52,36 @@ def classify(status: int, body: str, marker: str) -> dict:
 def unreached() -> dict:
     return {'outcome': DOWN, 'note': 'could not be reached'}
 
-def uptime_bp(up: int, samples: int) -> int:
-    if samples <= 0:
+def slot_count(opens: int, ends: int) -> int:
+    if opens < 0 or ends <= opens:
         return 0
-    return int(up) * FULL // int(samples)
+    return (int(ends) - int(opens)) // SLOT_SECONDS
 
-def share(fee: int, up: int, samples: int) -> dict:
+def slot_at(opens: int, ends: int, now: int) -> int:
+    if opens < 0 or now < opens or now >= ends:
+        return -1
+    k = (int(now) - int(opens)) // SLOT_SECONDS
+    if k >= slot_count(opens, ends):
+        return -1
+    if int(now) - (int(opens) + k * SLOT_SECONDS) >= READ_WITHIN:
+        return -1
+    return k
+
+def uptime_bp(up: int, slots: int) -> int:
+    if slots <= 0:
+        return 0
+    return int(up) * FULL // int(slots)
+
+def share(fee: int, up: int, taken: int, slots: int) -> dict:
     total = int(fee)
     up_n = int(up)
-    taken = int(samples)
-    if total < 0 or up_n < 0 or taken < 0 or (up_n > taken):
+    read = int(taken)
+    n = int(slots)
+    if total < 0 or up_n < 0 or read < 0 or (up_n > read) or (read > n):
         raise ValueError('an impossible tally')
-    if taken < MIN_SAMPLES:
+    if read < MIN_SAMPLES:
         return {'provider': 0, 'buyer': total, 'billed': False}
-    provider = total * up_n // taken
+    provider = total * up_n // n
     return {'provider': provider, 'buyer': total - provider, 'billed': True}
 
 def epoch_seconds(stamp: str):
@@ -103,6 +120,7 @@ from genlayer.types import *
 @dataclass
 class Reading:
     at: str
+    slot: u256
     outcome: str
 
 @gl.storage.allow
@@ -116,6 +134,7 @@ class Meter(gl.contract.Contract):
     plan: Address
     tallies: gl.storage.TreeMap[str, Tally]
     readings: gl.storage.TreeMap[str, gl.storage.DynArray[Reading]]
+    taken: gl.storage.TreeMap[str, bool]
 
     def __init__(self, plan: str):
         self.plan = _address(plan)
@@ -137,14 +156,13 @@ class Meter(gl.contract.Contract):
             raise gl.vm.UserError('the window has not opened')
         if now >= ends:
             raise gl.vm.UserError('the window has closed')
+        slot = slot_at(opens, ends, now)
+        if slot < 0:
+            raise gl.vm.UserError(f'a reading counts only in the first {READ_WITHIN} seconds of each {SLOT_SECONDS}-second slot')
+        slot_key = key + '#' + str(slot)
+        if slot_key in self.taken:
+            raise gl.vm.UserError(f'slot {slot} already has its reading')
         tally = self.tallies[key] if key in self.tallies else Tally(up=0, down=0, last_at='')
-        if tally.last_at:
-            before = epoch_seconds(tally.last_at)
-            if before is None:
-                raise gl.vm.UserError("the last sample's timestamp could not be read")
-            waited = now - before
-            if waited < MIN_SAMPLE_GAP:
-                raise gl.vm.UserError(f'the last sample was {waited} seconds ago and samples must be {MIN_SAMPLE_GAP} apart')
         url = url_for(str(terms['host']), str(terms['path']))
         marker = str(terms['marker'])
 
@@ -169,27 +187,29 @@ class Meter(gl.contract.Contract):
             tally.down = tally.down + 1
         tally.last_at = stamp
         self.tallies[key] = tally
-        self.readings.get_or_insert_default(key).append(Reading(at=stamp, outcome=outcome))
-        return _tally_dict(key, tally, ends, now)
+        self.taken[slot_key] = True
+        self.readings.get_or_insert_default(key).append(Reading(at=stamp, slot=slot, outcome=outcome))
+        return _tally_dict(key, tally, opens, ends, now)
 
     @gl.public.view
     def tally(self, plan_id: str) -> dict:
         key = plan_id.strip().lower()
         terms = gl.contract.get_at(self.plan).view().get(key)
+        opens = int(str(terms['opens_at']))
         ends = int(str(terms['ends_at']))
         tally = self.tallies[key] if key in self.tallies else Tally(up=0, down=0, last_at='')
-        return _tally_dict(key, tally, ends, epoch_seconds(_stamp()))
+        return _tally_dict(key, tally, opens, ends, epoch_seconds(_stamp()))
 
     @gl.public.view
     def samples(self, plan_id: str) -> list:
         key = plan_id.strip().lower()
         if key not in self.readings:
             return []
-        return [{'at': r.at, 'outcome': r.outcome} for r in self.readings[key]]
+        return [{'at': r.at, 'slot': str(r.slot), 'outcome': r.outcome} for r in self.readings[key]]
 
     @gl.public.view
     def settings(self) -> dict:
-        return {'plan': self.plan.as_hex, 'min_sample_gap_seconds': str(MIN_SAMPLE_GAP), 'min_samples': str(MIN_SAMPLES)}
+        return {'plan': self.plan.as_hex, 'slot_seconds': str(SLOT_SECONDS), 'read_within_seconds': str(READ_WITHIN), 'min_samples': str(MIN_SAMPLES)}
 
 def _read(url: str, marker: str) -> dict:
     try:
@@ -208,9 +228,10 @@ def _address(value) -> Address:
         return value
     return Address(str(value).strip())
 
-def _tally_dict(key: str, tally: Tally, ends: int, now) -> dict:
+def _tally_dict(key: str, tally: Tally, opens: int, ends: int, now) -> dict:
     up = int(tally.up)
     down = int(tally.down)
     taken = up + down
+    slots = slot_count(opens, ends)
     closed = ends >= 0 and now is not None and (now >= ends)
-    return {'plan_id': key, 'up': str(up), 'down': str(down), 'samples': str(taken), 'uptime_bp': str(uptime_bp(up, taken)), 'enough': taken >= MIN_SAMPLES, 'closed': closed, 'last_at': tally.last_at}
+    return {'plan_id': key, 'up': str(up), 'down': str(down), 'samples': str(taken), 'slots': str(slots), 'uptime_bp': str(uptime_bp(up, slots)), 'enough': taken >= MIN_SAMPLES, 'closed': closed, 'last_at': tally.last_at}

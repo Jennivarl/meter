@@ -1,6 +1,6 @@
 // The one place the network and the signing key are decided.
 //
-// Both deploy.mjs and demo.mjs import this, so there is no second copy of
+// Both deploy.mjs and verify.mjs import this, so there is no second copy of
 // the chain settings to drift.
 import { readFileSync } from "node:fs";
 import { Wallet } from "ethers";
@@ -42,6 +42,9 @@ export async function signer() {
   // what a front end wants and what a script cannot do.
   return privateKeyToAccount(wallet.privateKey);
 }
+
+/** A client that only reads, so anyone can verify without a key. */
+export const reader = () => createClient({ chain: studioNext });
 
 export async function connect() {
   const account = await signer();

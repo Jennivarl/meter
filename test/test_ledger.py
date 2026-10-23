@@ -144,11 +144,22 @@ def test_the_fee_divides_by_measured_uptime(direct_vm, ledger, stubs):
     assert got["provider_paid"] == "750000"
     assert got["buyer_paid"] == "250000"
     assert got["uptime_bp"] == "7500"
-    assert got["reason"] == "3 of 4 samples found the service up"
+    assert got["reason"] == "3 of 4 slots found the service up"
     assert stubs.transfers == [
         {"to": PROVIDER, "value": 750_000, "kind": EVM_PAY},
         {"to": BUYER, "value": 250_000, "kind": EVM_PAY},
     ]
+
+
+def test_slots_nobody_read_are_not_paid(direct_vm, ledger, stubs):
+    """Four of six slots read and all up: the provider is paid for four sixths."""
+    fund(direct_vm, ledger)
+    go_live(stubs).closed(up=4, down=0, slots=6)
+    got = settle(direct_vm, ledger)
+    assert got["provider_paid"] == "666666"
+    assert got["buyer_paid"] == "333334"
+    assert got["slots"] == "6"
+    assert got["reason"] == "4 of 6 slots found the service up, 2 not read"
 
 
 def test_what_was_paid_out_is_exactly_what_was_escrowed(direct_vm, ledger, stubs):

@@ -4,15 +4,16 @@ The pure part of METER. No chain, no network, no money.
 Paying for a service usually means paying for a promise: a monthly fee for
 "99.9% uptime", and a support ticket if it was not. METER pays for what was
 measured instead. The buyer escrows the fee, the contract samples the
-provider's own health URL across the billing window, and at the end the
-provider is paid for the share of samples that found the service up. The
-rest goes back to the buyer.
+provider's own health URL in fixed slots across the billing window, and at
+the end the provider is paid for the share of slots that found the service
+up. The rest goes back to the buyer.
 
 Everything here is a decision every validator re-derives identically:
 
     what a fetch result means          up, or down and why
+    which moments may be measured       one reading per fixed slot, early in it
     whether there is enough to bill     at least MIN_SAMPLES taken
-    how the fee divides                 exactly, with nothing created or lost
+    how the fee divides                 by every slot in the window, exactly
 
 Every sample consensus agrees on counts, and only a healthy answer is paid.
 There is deliberately no third bucket for samples that "do not count". Any
@@ -46,18 +47,26 @@ OUTCOMES = (UP, DOWN)
 # would mean paying for a promise again.
 MIN_SAMPLES = 3
 
-# Samples must be at least this far apart, measured across every caller.
-# Without it a party could take a burst of samples in one good minute and
-# call that a month.
-MIN_SAMPLE_GAP = 600
+# When a reading may be taken is fixed in advance, so neither side can choose
+# its moment. The window is cut into slots of SLOT_SECONDS from the moment the
+# provider accepted; each slot takes at most one reading, and only in its
+# first READ_WITHIN seconds. A provider cannot wait for a good minute and a
+# buyer cannot wait for a bad one: the band is short and set before anyone
+# knows how the service will behave in it.
+SLOT_SECONDS = 600
+READ_WITHIN = 240
 
-# A billing window with room for MIN_SAMPLES spaced samples and slack to
-# spare, so one slow transaction cannot leave a plan unable to bill, and no
-# longer than a month.
+# And the bill divides by every slot in the window, read or not. A slot
+# nobody read proves no service, so it is not paid; skipping the slots where
+# the service was down cannot raise the provider's share.
+
+# A billing window with room for MIN_SAMPLES slots and slack to spare, so
+# one slow transaction cannot leave a plan unable to bill, and no longer
+# than a month.
 MIN_WINDOW = 3600
 MAX_WINDOW = 31 * 24 * 3600
 
-# The share of samples that found the service up, in basis points.
+# The share of slots that found the service up, in basis points.
 FULL = 10000
 
 _MAX_PATH = 120
@@ -142,33 +151,58 @@ def unreached() -> dict:
     return {"outcome": DOWN, "note": "could not be reached"}
 
 
-def uptime_bp(up: int, samples: int) -> int:
-    """Measured uptime in basis points, rounded down. 0 before any sample."""
-    if samples <= 0:
+def slot_count(opens: int, ends: int) -> int:
+    """How many slots the window holds. 0 for a window that never opened."""
+    if opens < 0 or ends <= opens:
         return 0
-    return (int(up) * FULL) // int(samples)
+    return (int(ends) - int(opens)) // SLOT_SECONDS
 
 
-def share(fee: int, up: int, samples: int) -> dict:
+def slot_at(opens: int, ends: int, now: int) -> int:
+    """
+    The slot a reading at `now` belongs to, or -1 if `now` is not inside any
+    slot's reading band. Every validator derives the same answer from the
+    window and the transaction's own time.
+    """
+    if opens < 0 or now < opens or now >= ends:
+        return -1
+    k = (int(now) - int(opens)) // SLOT_SECONDS
+    if k >= slot_count(opens, ends):
+        return -1
+    if int(now) - (int(opens) + k * SLOT_SECONDS) >= READ_WITHIN:
+        return -1
+    return k
+
+
+def uptime_bp(up: int, slots: int) -> int:
+    """Measured uptime over every slot, in basis points, rounded down."""
+    if slots <= 0:
+        return 0
+    return (int(up) * FULL) // int(slots)
+
+
+def share(fee: int, up: int, taken: int, slots: int) -> dict:
     """
     How the escrowed fee divides between the two sides.
 
-    The provider is paid for the share of samples that found the service
-    up, rounded down; the buyer gets everything else. The two parts always
-    sum to exactly the fee, so no rounding can create or lose value, and
-    any fraction left by rounding goes to the side that paid.
+    The provider is paid for the share of the window's slots that were read
+    and found the service up, rounded down; the buyer gets everything else.
+    A slot nobody read is not paid. The two parts always sum to exactly the
+    fee, so no rounding can create or lose value, and any fraction left by
+    rounding goes to the side that paid.
 
-    Below MIN_SAMPLES the provider gets nothing and the buyer gets it all
-    back: there is not enough evidence to bill on.
+    Below MIN_SAMPLES readings the provider gets nothing and the buyer gets
+    it all back: there is not enough evidence to bill on.
     """
     total = int(fee)
     up_n = int(up)
-    taken = int(samples)
-    if total < 0 or up_n < 0 or taken < 0 or up_n > taken:
+    read = int(taken)
+    n = int(slots)
+    if total < 0 or up_n < 0 or read < 0 or up_n > read or read > n:
         raise ValueError("an impossible tally")
-    if taken < MIN_SAMPLES:
+    if read < MIN_SAMPLES:
         return {"provider": 0, "buyer": total, "billed": False}
-    provider = (total * up_n) // taken
+    provider = (total * up_n) // n
     return {"provider": provider, "buyer": total - provider, "billed": True}
 
 

@@ -6,7 +6,8 @@ UP = 'up'
 DOWN = 'down'
 OUTCOMES = (UP, DOWN)
 MIN_SAMPLES = 3
-MIN_SAMPLE_GAP = 600
+SLOT_SECONDS = 600
+READ_WITHIN = 240
 MIN_WINDOW = 3600
 MAX_WINDOW = 31 * 24 * 3600
 FULL = 10000
@@ -51,20 +52,36 @@ def classify(status: int, body: str, marker: str) -> dict:
 def unreached() -> dict:
     return {'outcome': DOWN, 'note': 'could not be reached'}
 
-def uptime_bp(up: int, samples: int) -> int:
-    if samples <= 0:
+def slot_count(opens: int, ends: int) -> int:
+    if opens < 0 or ends <= opens:
         return 0
-    return int(up) * FULL // int(samples)
+    return (int(ends) - int(opens)) // SLOT_SECONDS
 
-def share(fee: int, up: int, samples: int) -> dict:
+def slot_at(opens: int, ends: int, now: int) -> int:
+    if opens < 0 or now < opens or now >= ends:
+        return -1
+    k = (int(now) - int(opens)) // SLOT_SECONDS
+    if k >= slot_count(opens, ends):
+        return -1
+    if int(now) - (int(opens) + k * SLOT_SECONDS) >= READ_WITHIN:
+        return -1
+    return k
+
+def uptime_bp(up: int, slots: int) -> int:
+    if slots <= 0:
+        return 0
+    return int(up) * FULL // int(slots)
+
+def share(fee: int, up: int, taken: int, slots: int) -> dict:
     total = int(fee)
     up_n = int(up)
-    taken = int(samples)
-    if total < 0 or up_n < 0 or taken < 0 or (up_n > taken):
+    read = int(taken)
+    n = int(slots)
+    if total < 0 or up_n < 0 or read < 0 or (up_n > read) or (read > n):
         raise ValueError('an impossible tally')
-    if taken < MIN_SAMPLES:
+    if read < MIN_SAMPLES:
         return {'provider': 0, 'buyer': total, 'billed': False}
-    provider = total * up_n // taken
+    provider = total * up_n // n
     return {'provider': provider, 'buyer': total - provider, 'billed': True}
 
 def epoch_seconds(stamp: str):

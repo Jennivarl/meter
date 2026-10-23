@@ -7,7 +7,7 @@ measured.
     fund(plan_id)      payable, the buyer escrows exactly the plan's fee
     reclaim(plan_id)   the buyer takes it back from a plan never accepted
     settle(plan_id)    after the window: the provider is paid for the share
-                       of samples that found the service up, the buyer gets
+                       of the window's slots that found the service up, the buyer gets
                        the rest
 
 This contract measures nothing and decides nothing. It reads the terms from
@@ -53,6 +53,7 @@ class Escrow:
     buyer_paid: u256
     uptime_bp: u256
     samples: u256
+    slots: u256
     decided_at: str
     reason: str
 
@@ -101,6 +102,7 @@ class Ledger(gl.contract.Contract):
             buyer_paid=0,
             uptime_bp=0,
             samples=0,
+            slots=0,
             decided_at="",
             reason="held until the window closes",
         )
@@ -157,16 +159,19 @@ class Ledger(gl.contract.Contract):
 
         up = int(str(tally["up"]))
         taken = int(str(tally["samples"]))
-        split = share(int(escrow.amount), up, taken)
+        slots = int(str(tally["slots"]))
+        split = share(int(escrow.amount), up, taken, slots)
 
         escrow.state = STATE_SETTLED
         escrow.provider_paid = split["provider"]
         escrow.buyer_paid = split["buyer"]
-        escrow.uptime_bp = uptime_bp(up, taken)
+        escrow.uptime_bp = uptime_bp(up, slots)
         escrow.samples = taken
+        escrow.slots = slots
         escrow.decided_at = _stamp()
         if split["billed"]:
-            escrow.reason = f"{up} of {taken} samples found the service up"
+            unread = f", {slots - taken} not read" if slots > taken else ""
+            escrow.reason = f"{up} of {slots} slots found the service up{unread}"
         else:
             escrow.reason = f"only {taken} samples were taken and {MIN_SAMPLES} are needed to bill"
         self.escrows[key] = escrow
@@ -263,6 +268,7 @@ def _as_dict(key: str, escrow: Escrow) -> dict:
         "buyer_paid": str(escrow.buyer_paid),
         "uptime_bp": str(escrow.uptime_bp),
         "samples": str(escrow.samples),
+        "slots": str(escrow.slots),
         "decided_at": escrow.decided_at,
         "reason": escrow.reason,
     }

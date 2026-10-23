@@ -71,6 +71,7 @@ class Stubs:
             "up": "0",
             "down": "0",
             "samples": "0",
+            "slots": "6",
             "uptime_bp": "0",
             "enough": False,
             "closed": False,
@@ -87,15 +88,18 @@ class Stubs:
         """Before the provider has accepted: no window yet."""
         return self.set_terms(state="proposed", accepted_at="", opens_at="-1", ends_at="-1")
 
-    def closed(self, up: int, down: int):
-        """A window that has ended with this many readings."""
+    def closed(self, up: int, down: int, slots: int = 0):
+        """A window that has ended with this many readings, out of `slots`
+        slots (every slot read, unless said otherwise)."""
         taken = up + down
+        slots = slots or taken
         self.reading = {
             **self.reading,
             "up": str(up),
             "down": str(down),
             "samples": str(taken),
-            "uptime_bp": str((up * 10000) // taken if taken else 0),
+            "slots": str(slots),
+            "uptime_bp": str((up * 10000) // slots if slots else 0),
             "enough": taken >= 3,
             "closed": True,
         }

@@ -15,11 +15,17 @@ different places, and requiring agreement on why it was down would let
 outages fail consensus while healthy samples never do. Nothing a caller
 passes reaches the fetch: the URL and the marker come from PLAN.
 
-Three rules decide which samples exist at all:
+When a sample may be taken is fixed in advance, so neither side can pick
+its moment:
 
-    only inside the window      from the provider's acceptance to its end
-    only MIN_SAMPLE_GAP apart   across every caller, so nobody can take a
-                                burst of samples in one good minute
+    fixed slots                 the window is cut into SLOT_SECONDS slots
+                                from the provider's acceptance
+    one reading per slot        across every caller
+    only early in the slot      within READ_WITHIN seconds of its start, a
+                                band set before anyone knows how the service
+                                will behave in it
+    every slot is billed        a slot nobody read is not paid, so skipping
+                                the bad slots cannot raise the provider's share
     anyone may take one         buyer, provider, or a stranger, because
                                 every sample is the network's reading of
                                 the same URL, not the caller's
@@ -31,12 +37,15 @@ import genlayer as gl
 from genlayer.types import *
 
 from contracts.metering import (
-    MIN_SAMPLE_GAP,
     MIN_SAMPLES,
     OUTCOMES,
+    READ_WITHIN,
+    SLOT_SECONDS,
     UP,
     classify,
     epoch_seconds,
+    slot_at,
+    slot_count,
     unreached,
     uptime_bp,
     url_for,
@@ -46,6 +55,7 @@ from contracts.metering import (
 @dataclass
 class Reading:
     at: str
+    slot: u256
     outcome: str
 
 
@@ -63,6 +73,8 @@ class Meter(gl.contract.Contract):
     plan: Address
     tallies: gl.storage.TreeMap[str, Tally]
     readings: gl.storage.TreeMap[str, gl.storage.DynArray[Reading]]
+    # plan_id + "#" + slot number, for every slot that has its reading.
+    taken: gl.storage.TreeMap[str, bool]
 
     def __init__(self, plan: str):
         self.plan = _address(plan)
@@ -72,9 +84,9 @@ class Meter(gl.contract.Contract):
         """
         One reading of the live service.
 
-        Refused outside the window and inside the gap, so every reading
-        that exists is one the rules allowed, and none can be added after
-        the window closes and the bill is settled.
+        Refused outside a slot's reading band and in a slot already read, so
+        every reading that exists is one the schedule allowed, and none can
+        be added after the window closes and the bill is settled.
         """
         key = plan_id.strip().lower()
         terms = gl.contract.get_at(self.plan).view().get(key)
@@ -93,16 +105,15 @@ class Meter(gl.contract.Contract):
         if now >= ends:
             raise gl.vm.UserError("the window has closed")
 
+        slot = slot_at(opens, ends, now)
+        if slot < 0:
+            raise gl.vm.UserError(
+                f"a reading counts only in the first {READ_WITHIN} seconds of each {SLOT_SECONDS}-second slot"
+            )
+        slot_key = key + "#" + str(slot)
+        if slot_key in self.taken:
+            raise gl.vm.UserError(f"slot {slot} already has its reading")
         tally = self.tallies[key] if key in self.tallies else Tally(up=0, down=0, last_at="")
-        if tally.last_at:
-            before = epoch_seconds(tally.last_at)
-            if before is None:
-                raise gl.vm.UserError("the last sample's timestamp could not be read")
-            waited = now - before
-            if waited < MIN_SAMPLE_GAP:
-                raise gl.vm.UserError(
-                    f"the last sample was {waited} seconds ago and samples must be {MIN_SAMPLE_GAP} apart"
-                )
 
         url = url_for(str(terms["host"]), str(terms["path"]))
         marker = str(terms["marker"])
@@ -133,8 +144,9 @@ class Meter(gl.contract.Contract):
             tally.down = tally.down + 1
         tally.last_at = stamp
         self.tallies[key] = tally
-        self.readings.get_or_insert_default(key).append(Reading(at=stamp, outcome=outcome))
-        return _tally_dict(key, tally, ends, now)
+        self.taken[slot_key] = True
+        self.readings.get_or_insert_default(key).append(Reading(at=stamp, slot=slot, outcome=outcome))
+        return _tally_dict(key, tally, opens, ends, now)
 
     @gl.public.view
     def tally(self, plan_id: str) -> dict:
@@ -147,22 +159,24 @@ class Meter(gl.contract.Contract):
         """
         key = plan_id.strip().lower()
         terms = gl.contract.get_at(self.plan).view().get(key)
+        opens = int(str(terms["opens_at"]))
         ends = int(str(terms["ends_at"]))
         tally = self.tallies[key] if key in self.tallies else Tally(up=0, down=0, last_at="")
-        return _tally_dict(key, tally, ends, epoch_seconds(_stamp()))
+        return _tally_dict(key, tally, opens, ends, epoch_seconds(_stamp()))
 
     @gl.public.view
     def samples(self, plan_id: str) -> list:
         key = plan_id.strip().lower()
         if key not in self.readings:
             return []
-        return [{"at": r.at, "outcome": r.outcome} for r in self.readings[key]]
+        return [{"at": r.at, "slot": str(r.slot), "outcome": r.outcome} for r in self.readings[key]]
 
     @gl.public.view
     def settings(self) -> dict:
         return {
             "plan": self.plan.as_hex,
-            "min_sample_gap_seconds": str(MIN_SAMPLE_GAP),
+            "slot_seconds": str(SLOT_SECONDS),
+            "read_within_seconds": str(READ_WITHIN),
             "min_samples": str(MIN_SAMPLES),
         }
 
@@ -188,17 +202,19 @@ def _address(value) -> Address:
     return Address(str(value).strip())
 
 
-def _tally_dict(key: str, tally: Tally, ends: int, now) -> dict:
+def _tally_dict(key: str, tally: Tally, opens: int, ends: int, now) -> dict:
     up = int(tally.up)
     down = int(tally.down)
     taken = up + down
+    slots = slot_count(opens, ends)
     closed = ends >= 0 and now is not None and now >= ends
     return {
         "plan_id": key,
         "up": str(up),
         "down": str(down),
         "samples": str(taken),
-        "uptime_bp": str(uptime_bp(up, taken)),
+        "slots": str(slots),
+        "uptime_bp": str(uptime_bp(up, slots)),
         "enough": taken >= MIN_SAMPLES,
         "closed": closed,
         "last_at": tally.last_at,
